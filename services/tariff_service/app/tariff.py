@@ -15,7 +15,7 @@ class TariffConfigError(RuntimeError):
 class TariffConfig:
     version: str
     auto_limit_rub: Decimal
-    min_premium_rub: int
+    min_premium_rub: Decimal
     base_rates: Dict[str, Dict[str, Decimal]]  # cargo -> condition -> rate (fraction)
     k_franchise: Dict[str, Decimal]            # franchise_rub (string key) -> coeff
     k_reefer: Dict[str, Decimal]              # "true"/"false" -> coeff
@@ -41,7 +41,7 @@ def load_config(path: str) -> TariffConfig:
     try:
         version = str(raw["version"])
         auto_limit_rub = _d(raw["auto_limit_rub"])
-        min_premium_rub = int(raw["min_premium_rub"])
+        min_premium_rub = _d(raw["min_premium_rub"])
 
         base_rates: Dict[str, Dict[str, Decimal]] = {}
         for cargo_id, by_cond in raw["base_rates"].items():
@@ -104,13 +104,13 @@ def assess(cfg: TariffConfig, *, cargo_class_id: str, sum_insured_rub: Decimal,
     return "AUTO_OK", reasons
 
 
-def _round_money(amount: Decimal, *, step_rub: int, mode: str) -> int:
+def _round_money(amount: Decimal, *, step_rub: int, mode: str) -> Decimal:
     # Round to nearest step (e.g., 1 rub, 10 rub, 100 rub)
     step = Decimal(step_rub)
     if step == 1:
         if mode == "CEIL":
-            return int(amount.to_integral_value(rounding=ROUND_CEILING))
-        return int(amount.to_integral_value(rounding=ROUND_HALF_UP))
+            return amount.to_integral_value(rounding=ROUND_CEILING)
+        return amount.to_integral_value(rounding=ROUND_HALF_UP)
 
     # Scale to step
     scaled = amount / step
@@ -118,11 +118,11 @@ def _round_money(amount: Decimal, *, step_rub: int, mode: str) -> int:
         rounded = scaled.to_integral_value(rounding=ROUND_CEILING) * step
     else:
         rounded = scaled.to_integral_value(rounding=ROUND_HALF_UP) * step
-    return int(rounded)
+    return rounded
 
 
 def quote(cfg: TariffConfig, *, cargo_class_id: str, sum_insured_rub: Decimal,
-          condition: str, franchise_rub: int, is_reefer: bool, route_zone: str) -> Tuple[int, bool]:
+          condition: str, franchise_rub: int, is_reefer: bool, route_zone: str) -> Tuple[Decimal, bool]:
     cond = str(condition).upper()
     base_rate = cfg.base_rates[cargo_class_id][cond]
     k_fr = cfg.k_franchise[str(franchise_rub)]

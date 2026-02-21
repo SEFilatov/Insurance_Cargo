@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
@@ -31,7 +32,7 @@ class QuoteRequest(BaseModel):
 
 class QuoteResponse(BaseModel):
     decision: Decision
-    premium_rub: Optional[int] = None
+    premium_rub: Optional[Decimal] = None
     min_premium_applied: Optional[bool] = None
     tariff_version: str
     public_breakdown: Dict[str, Any]
