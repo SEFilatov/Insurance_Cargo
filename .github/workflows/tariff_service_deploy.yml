@@ -127,7 +127,7 @@ jobs:
           yc config get cloud-id
           yc config get folder-id
           yc config profile list
-          yc config profile get
+          yc config profile get ci-profile
 
       - name: Configure Docker auth for Yandex Container Registry
         run: |
