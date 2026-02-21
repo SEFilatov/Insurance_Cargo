@@ -52,3 +52,23 @@ Workflow: `.github/workflows/tariff_service_ci_cd.yml`
 5. Assign minimal roles to CI service account (registry push + serverless deploy).
 
 See detailed notes in `docs/yandex-cloud-deploy-plan.md`.
+
+## GitHub Actions deploy (tariff_service)
+
+Workflow: `.github/workflows/tariff_service_deploy.yml`
+
+Используемые GitHub Secrets (без значений):
+- `YC_SA_KEY_JSON`
+- `YC_CLOUD_ID`
+- `YC_FOLDER_ID`
+- `YC_REGISTRY_ID`
+- `YC_CONTAINER_NAME` (опционально, иначе используется `tariff-engine`)
+
+Как запустить деплой вручную (`workflow_dispatch`):
+1. Откройте GitHub → **Actions**.
+2. Выберите workflow **tariff-service-deploy**.
+3. Нажмите **Run workflow**, выберите ветку и подтвердите запуск.
+
+Где смотреть результат:
+- В GitHub: вкладка **Actions** → запуск workflow `tariff-service-deploy` (логи шагов build/push/deploy).
+- В Yandex Cloud Console: **Serverless Containers** → контейнер (например, `tariff-engine`) → список revisions и статус последнего деплоя.
