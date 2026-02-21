@@ -24,25 +24,81 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate required secrets (fail fast)
+      - name: Debug credentials (masked)
         run: |
           set -euo pipefail
 
-          required_vars=(YC_CLOUD_ID YC_FOLDER_ID YC_REGISTRY_ID YC_SA_KEY_JSON YC_SERVICE_ACCOUNT_ID)
+          mask() {
+            local value="$1"
+            local length=${#value}
+            if [ "$length" -ge 8 ]; then
+              printf '%s…%s' "${value:0:4}" "${value:length-4:4}"
+            else
+              printf '<too short>'
+            fi
+          }
+
+          print_masked_var() {
+            local var_name="$1"
+            local value="${!var_name:-}"
+            if [ -n "$value" ]; then
+              printf '%s: set (len=%s, masked=%s)\n' "$var_name" "${#value}" "$(mask "$value")"
+            else
+              printf '%s: unset\n' "$var_name"
+            fi
+          }
+
+          required_vars=(YC_CLOUD_ID YC_FOLDER_ID YC_REGISTRY_ID YC_SERVICE_ACCOUNT_ID)
           for var_name in "${required_vars[@]}"; do
             if [ -z "${!var_name:-}" ]; then
-              echo "Required secret is empty or undefined: $var_name"
+              echo "Missing required variable: $var_name"
               exit 1
             fi
           done
 
-          CONTAINER_NAME="${YC_CONTAINER_NAME:-tariff-engine}"
-          if [ -z "$CONTAINER_NAME" ]; then
-            CONTAINER_NAME="tariff-engine"
+          if [ -z "${YC_SA_KEY_JSON:-}" ]; then
+            echo "Missing required variable: YC_SA_KEY_JSON"
+            exit 1
           fi
 
-          echo "Container name for deploy: $CONTAINER_NAME"
+          echo "Checking Yandex Cloud variables (masked):"
+          print_masked_var YC_CLOUD_ID
+          print_masked_var YC_FOLDER_ID
+          print_masked_var YC_REGISTRY_ID
+          print_masked_var YC_SERVICE_ACCOUNT_ID
+          print_masked_var YC_CONTAINER_NAME
+
+          KEY_PATH="$RUNNER_TEMP/key.json"
+          printf '%s' "$YC_SA_KEY_JSON" > "$KEY_PATH"
+
+          python - "$KEY_PATH" <<'PY'
+          import json
+          import sys
+
+          path = sys.argv[1]
+          with open(path, encoding="utf-8") as fh:
+              data = json.load(fh)
+
+          if not isinstance(data, dict):
+              raise SystemExit("key.json parsed, but top-level JSON is not an object")
+
+          important = ["id", "service_account_id", "created_at"]
+          present = [field for field in important if field in data]
+          print("key.json parsed ok; fields present:", "/".join(present) if present else "none-of-id-service_account_id-created_at")
+          print("key.json top-level keys:", ", ".join(sorted(data.keys())[:20]))
+          PY
+
+          CONTAINER_NAME="${YC_CONTAINER_NAME:-tariff-service}"
+          if [ -z "$CONTAINER_NAME" ]; then
+            CONTAINER_NAME="tariff-service"
+          fi
+
+          IMAGE="cr.yandex/${YC_REGISTRY_ID}/tariff-service:${GITHUB_SHA}"
+          echo "CONTAINER_NAME=$CONTAINER_NAME"
+          echo "IMAGE=$IMAGE"
+
           echo "CONTAINER_NAME=$CONTAINER_NAME" >> "$GITHUB_ENV"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
       - name: Install yc CLI
         run: |
@@ -63,6 +119,15 @@ jobs:
           "$HOME/yandex-cloud/bin/yc" config set folder-id "$YC_FOLDER_ID"
 
           echo "yc profile configured for cloud/folder from secrets"
+
+      - name: Debug yc context (safe)
+        run: |
+          set -euo pipefail
+          yc --version
+          yc config get cloud-id
+          yc config get folder-id
+          yc config profile list
+          yc config profile get
 
       - name: Configure Docker auth for Yandex Container Registry
         run: |
