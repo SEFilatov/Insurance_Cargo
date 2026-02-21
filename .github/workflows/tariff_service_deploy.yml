@@ -18,6 +18,7 @@ jobs:
       YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
       YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
       YC_CONTAINER_NAME: ${{ secrets.YC_CONTAINER_NAME }}
+      YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
 
     steps:
       - name: Checkout repository
@@ -27,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          required_vars=(YC_CLOUD_ID YC_FOLDER_ID YC_REGISTRY_ID YC_SA_KEY_JSON)
+          required_vars=(YC_CLOUD_ID YC_FOLDER_ID YC_REGISTRY_ID YC_SA_KEY_JSON YC_SERVICE_ACCOUNT_ID)
           for var_name in "${required_vars[@]}"; do
             if [ -z "${!var_name:-}" ]; then
               echo "Required secret is empty or undefined: $var_name"
@@ -90,6 +91,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          : "${YC_SERVICE_ACCOUNT_ID:?YC_SERVICE_ACCOUNT_ID is required}"
+
           echo "Deploying container revision to: $CONTAINER_NAME"
           echo "Image: $IMAGE_SHA"
 
@@ -100,6 +103,7 @@ jobs:
           yc serverless container revision deploy \
             --container-name "$CONTAINER_NAME" \
             --image "$IMAGE_SHA" \
+            --service-account-id "$YC_SERVICE_ACCOUNT_ID" \
             --cores 1 \
             --memory 512MB \
             --concurrency 4 \
