@@ -1,0 +1,106 @@
+name: tariff-service-deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "services/tariff_service/**"
+      - ".github/workflows/tariff_service_deploy.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      YC_CLOUD_ID: ${{ secrets.YC_CLOUD_ID }}
+      YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+      YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+      YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
+      YC_CONTAINER_NAME: ${{ secrets.YC_CONTAINER_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets (fail fast)
+        run: |
+          set -euo pipefail
+
+          required_vars=(YC_CLOUD_ID YC_FOLDER_ID YC_REGISTRY_ID YC_SA_KEY_JSON)
+          for var_name in "${required_vars[@]}"; do
+            if [ -z "${!var_name:-}" ]; then
+              echo "Required secret is empty or undefined: $var_name"
+              exit 1
+            fi
+          done
+
+          CONTAINER_NAME="${YC_CONTAINER_NAME:-tariff-engine}"
+          if [ -z "$CONTAINER_NAME" ]; then
+            CONTAINER_NAME="tariff-engine"
+          fi
+
+          echo "Container name for deploy: $CONTAINER_NAME"
+          echo "CONTAINER_NAME=$CONTAINER_NAME" >> "$GITHUB_ENV"
+
+      - name: Install yc CLI
+        run: |
+          set -euo pipefail
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          echo "$HOME/yandex-cloud/bin" >> "$GITHUB_PATH"
+
+      - name: Authorize yc CLI
+        run: |
+          set -euo pipefail
+
+          SA_KEY_PATH="$RUNNER_TEMP/yc-sa-key.json"
+          printf '%s' "$YC_SA_KEY_JSON" > "$SA_KEY_PATH"
+
+          "$HOME/yandex-cloud/bin/yc" config profile create ci-profile || true
+          "$HOME/yandex-cloud/bin/yc" config set service-account-key "$SA_KEY_PATH"
+          "$HOME/yandex-cloud/bin/yc" config set cloud-id "$YC_CLOUD_ID"
+          "$HOME/yandex-cloud/bin/yc" config set folder-id "$YC_FOLDER_ID"
+
+          echo "yc profile configured for cloud/folder from secrets"
+
+      - name: Configure Docker auth for Yandex Container Registry
+        run: |
+          set -euo pipefail
+          yc container registry configure-docker
+
+      - name: Build and push Docker image
+        env:
+          IMAGE_SHA: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/tariff-engine:${{ github.sha }}
+          IMAGE_LATEST: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/tariff-engine:latest
+        run: |
+          set -euo pipefail
+
+          echo "Building image from context: services/tariff_service"
+          docker build \
+            -t "$IMAGE_SHA" \
+            -t "$IMAGE_LATEST" \
+            services/tariff_service
+
+          docker push "$IMAGE_SHA"
+          docker push "$IMAGE_LATEST"
+
+          echo "IMAGE_SHA=$IMAGE_SHA" >> "$GITHUB_ENV"
+
+      - name: Deploy Serverless Container revision
+        run: |
+          set -euo pipefail
+
+          echo "Deploying container revision to: $CONTAINER_NAME"
+          echo "Image: $IMAGE_SHA"
+
+          # Container name comes from YC_CONTAINER_NAME secret if provided.
+          # Default fallback is tariff-engine.
+          # Tune MVP resources below for your workload:
+          # --cores, --memory, --concurrency, --execution-timeout
+          yc serverless container revision deploy \
+            --container-name "$CONTAINER_NAME" \
+            --image "$IMAGE_SHA" \
+            --cores 1 \
+            --memory 512MB \
+            --concurrency 4 \
+            --execution-timeout 10s
