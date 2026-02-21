@@ -14,7 +14,7 @@ class TariffConfigError(RuntimeError):
 @dataclass(frozen=True)
 class TariffConfig:
     version: str
-    auto_limit_rub: int
+    auto_limit_rub: Decimal
     min_premium_rub: int
     base_rates: Dict[str, Dict[str, Decimal]]  # cargo -> condition -> rate (fraction)
     k_franchise: Dict[str, Decimal]            # franchise_rub (string key) -> coeff
@@ -40,7 +40,7 @@ def load_config(path: str) -> TariffConfig:
 
     try:
         version = str(raw["version"])
-        auto_limit_rub = int(raw["auto_limit_rub"])
+        auto_limit_rub = _d(raw["auto_limit_rub"])
         min_premium_rub = int(raw["min_premium_rub"])
 
         base_rates: Dict[str, Dict[str, Decimal]] = {}
@@ -74,7 +74,7 @@ def load_config(path: str) -> TariffConfig:
     )
 
 
-def assess(cfg: TariffConfig, *, cargo_class_id: str, sum_insured_rub: int,
+def assess(cfg: TariffConfig, *, cargo_class_id: str, sum_insured_rub: Decimal,
            condition: str, franchise_rub: int, is_reefer: bool, route_zone: str) -> Tuple[str, list[str]]:
     reasons: list[str] = []
 
@@ -87,7 +87,7 @@ def assess(cfg: TariffConfig, *, cargo_class_id: str, sum_insured_rub: int,
         return "REFER", ["CONDITION_NOT_SUPPORTED"]
 
     # 2) Limit
-    if sum_insured_rub > cfg.auto_limit_rub:
+    if _d(sum_insured_rub) > cfg.auto_limit_rub:
         return "REFER", ["LIMIT_EXCEEDED"]
 
     # 3) Exact buckets for franchise and route
@@ -121,7 +121,7 @@ def _round_money(amount: Decimal, *, step_rub: int, mode: str) -> int:
     return int(rounded)
 
 
-def quote(cfg: TariffConfig, *, cargo_class_id: str, sum_insured_rub: int,
+def quote(cfg: TariffConfig, *, cargo_class_id: str, sum_insured_rub: Decimal,
           condition: str, franchise_rub: int, is_reefer: bool, route_zone: str) -> Tuple[int, bool]:
     cond = str(condition).upper()
     base_rate = cfg.base_rates[cargo_class_id][cond]
