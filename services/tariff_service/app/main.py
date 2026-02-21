@@ -21,12 +21,12 @@ def create_app() -> FastAPI:
     app.state.tariff_config = cfg
 
     @app.get("/health", response_model=HealthResponse)
-    def health() -> HealthResponse:
+    def health() -> HealthResponse: 
         cfg2: TariffConfig = app.state.tariff_config
         return HealthResponse(status="ok", tariff_version=cfg2.version)
 
     @app.post("/quote", response_model=QuoteResponse)
-    def post_quote(req: QuoteRequest) -> QuoteResponse:
+    def post_quote(req: QuoteRequest) -> QuoteResponse: 
         cfg2: TariffConfig = app.state.tariff_config
 
         decision_str, reasons = assess(
