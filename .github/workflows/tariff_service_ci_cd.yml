@@ -1,0 +1,86 @@
+name: tariff-service-ci-cd
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "services/tariff_service/**"
+      - ".github/workflows/tariff_service_ci_cd.yml"
+  pull_request:
+    paths:
+      - "services/tariff_service/**"
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/tariff_service
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint
+        run: ruff check app
+
+      - name: Build image (local validation)
+        run: |
+          # IMPORTANT: build context limited to services/tariff_service
+          docker build -t tariff-service:${{ github.sha }} .
+
+  deploy-yc-serverless:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: lint-and-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install YC CLI
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          echo "$HOME/yandex-cloud/bin" >> $GITHUB_PATH
+
+      - name: Authorize in Yandex Cloud
+        env:
+          YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
+        run: |
+          echo "$YC_SA_KEY_JSON" > key.json
+          yc config profile create ci-profile || true
+          yc config set service-account-key key.json
+          yc config set cloud-id ${{ secrets.YC_CLOUD_ID }}
+          yc config set folder-id ${{ secrets.YC_FOLDER_ID }}
+
+      - name: Configure Docker auth for YC Registry
+        run: yc container registry configure-docker
+
+      - name: Build and push image
+        env:
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          IMAGE="cr.yandex/${YC_REGISTRY_ID}/tariff-service:${GITHUB_SHA}"
+          docker build -t "$IMAGE" services/tariff_service
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy to Serverless Container (template)
+        run: |
+          # Replace `tariff-service` with your target serverless container name.
+          # Adjust memory/cores/concurrency according to production sizing.
+          yc serverless container revision deploy \
+            --container-name tariff-service \
+            --image "$IMAGE" \
+            --memory 512MB \
+            --cores 1 \
+            --concurrency 8 \
+            --service-account-id <service_account_id_placeholder>

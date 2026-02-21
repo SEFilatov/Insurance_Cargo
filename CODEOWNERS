@@ -1,0 +1,9 @@
+# Default owners
+* @platform-team
+
+# Service owners
+/services/tariff_service/ @pricing-team @platform-team
+
+# Infrastructure and CI
+/infra/ @devops-team @platform-team
+/.github/ @devops-team @platform-team
