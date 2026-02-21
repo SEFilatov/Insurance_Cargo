@@ -1,0 +1,40 @@
+{
+  "version": "2026-02-18_v1",
+  "auto_limit_rub": 10000000,
+  "min_premium_rub": 500,
+  "base_rates": {
+    "CARGO001": {"NEW": 0.10, "USED": 0.09},
+    "CARGO002": {"NEW": 0.10, "USED": 0.09},
+    "CARGO003": {"NEW": 0.11, "USED": 0.099},
+    "CARGO004": {"NEW": 0.10, "USED": 0.09},
+    "CARGO005": {"NEW": 0.10, "USED": 0.09},
+    "CARGO006": {"NEW": 0.10, "USED": 0.09},
+    "CARGO007": {"NEW": 0.10, "USED": 0.09},
+    "CARGO008": {"NEW": 0.10, "USED": 0.09},
+    "CARGO009": {"NEW": 0.10, "USED": 0.09},
+    "CARGO010": {"NEW": 0.10, "USED": 0.09},
+    "CARGO011": {"NEW": 0.10, "USED": 0.09},
+    "CARGO012": {"NEW": 0.10, "USED": 0.09},
+    "CARGO013": {"NEW": 0.10, "USED": 0.09},
+    "CARGO014": {"NEW": 0.10, "USED": 0.09},
+    "CARGO015": {"NEW": 0.10, "USED": 0.09},
+    "CARGO016": {"NEW": 0.10, "USED": 0.09}
+  },
+  "k_franchise": {
+    "20000": 1.0,
+    "50000": 0.9
+  },
+  "k_reefer": {
+    "false": 1.0,
+    "true": 1.25
+  },
+  "k_route": {
+    "РФ": 1.0,
+    "СНГ-РФ": 1.1,
+    "ВЕСЬ МИР-РФ": 1.2
+  },
+  "rounding": {
+    "mode": "HALF_UP",
+    "step_rub": 1
+  }
+}
