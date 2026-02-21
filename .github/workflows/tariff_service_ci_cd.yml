@@ -73,14 +73,22 @@ jobs:
           docker push "$IMAGE"
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
 
-      - name: Deploy to Serverless Container (template)
+      - name: Deploy to Serverless Container
+        env:
+          YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          YC_CONTAINER_NAME: ${{ secrets.YC_CONTAINER_NAME }}
         run: |
-          # Replace `tariff-service` with your target serverless container name.
-          # Adjust memory/cores/concurrency according to production sizing.
+          set -euo pipefail
+
+          : "${IMAGE:?IMAGE is required (check previous step)}"
+          : "${YC_SERVICE_ACCOUNT_ID:?YC_SERVICE_ACCOUNT_ID is required}"
+
+          CONTAINER_NAME="${YC_CONTAINER_NAME:-tariff-service}"
+
           yc serverless container revision deploy \
-            --container-name tariff-service \
-            --image "$IMAGE" \
+            --container-name "${CONTAINER_NAME}" \
+            --image "${IMAGE}" \
             --memory 512MB \
             --cores 1 \
             --concurrency 8 \
-            --service-account-id <service_account_id_placeholder>
+            --service-account-id "${YC_SERVICE_ACCOUNT_ID}"
