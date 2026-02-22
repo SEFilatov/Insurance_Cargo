@@ -22,7 +22,7 @@ class QuoteRequest(BaseModel):
     cargo_class_id: str = Field(..., min_length=3, max_length=64)
     sum_insured_rub: condecimal(gt=0, max_digits=14, decimal_places=2) = Field(
         ...,
-        description="Insured sum in RUB, supports kopecks",
+        description="Страховая сумма в рублях включая копейки",
     )
     condition: Condition
     franchise_rub: conint(ge=0, le=10**9)
