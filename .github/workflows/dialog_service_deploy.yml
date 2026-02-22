@@ -1,0 +1,77 @@
+name: Build & Deploy (Dialog Service) to Yandex Serverless Containers
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "services/dialog_service/**"
+      - ".github/workflows/dialog_service_deploy.yml"
+
+permissions:
+  contents: read
+  id-token: write   # нужно для OIDC / Workload Identity Federation
+
+jobs:
+  deploy-dialog:
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_URL: cr.yandex/${{ vars.YC_REGISTRY_ID }}/${{ vars.YC_DIALOG_REPOSITORY }}:${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Получаем IAM token через OIDC/WIF (без ключей)
+      - name: Get Yandex Cloud IAM token (OIDC)
+        id: get-iam-token
+        uses: docker://ghcr.io/yc-actions/yc-iam-token-fed:1.0.0
+        with:
+          yc-sa-id: ${{ vars.YC_CI_SA_ID }}
+
+      # Логин в Yandex Container Registry
+      - name: Login to Yandex Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: cr.yandex
+          username: iam
+          password: ${{ steps.get-iam-token.outputs.token }}
+
+      # Build & push image (важно: context = services/dialog)
+      - name: Build and push dialog image
+        working-directory: services/dialog
+        run: |
+          docker build -t $IMAGE_URL .
+          docker push $IMAGE_URL
+
+      # Deploy to Serverless Containers
+      - name: Deploy dialog service
+        uses: yc-actions/yc-sls-container-deploy@v4
+        with:
+          yc-sa-id: ${{ vars.YC_CI_SA_ID }}
+          folder-id: ${{ vars.YC_FOLDER_ID }}
+
+          # Имя serverless container в YC (например: dialog-service)
+          container-name: ${{ vars.YC_DIALOG_CONTAINER_NAME }}
+
+          # Service account, под которым будет работать revision (runtime)
+          revision-service-account-id: ${{ vars.YC_RUNTIME_SA_ID }}
+
+          revision-image-url: ${{ env.IMAGE_URL }}
+          revision-cores: 1
+          revision-memory: 512Mb
+          revision-core-fraction: 100
+          revision-concurrency: 8
+          revision-execution-timeout: 15
+
+          # ENV переменные для сервиса (подставь свои имена vars)
+          revision-env: |
+            YANDEX_FOLDER_ID=${{ vars.YANDEX_FOLDER_ID }}
+            YANDEX_BASE_URL=https://llm.api.cloud.yandex.net/v1
+            YANDEX_MODEL_URI=${{ vars.YANDEX_MODEL_URI }}
+            TARIFF_URL=${{ vars.TARIFF_URL }}
+            ALLOW_ORIGINS=${{ vars.ALLOW_ORIGINS }}
+
+          # Секреты лучше хранить не в vars, а в Lockbox.
+          # Но если на старте кладёшь API key в GitHub Secrets:
+          revision-env-from-secrets: |
+            YANDEX_API_KEY=${{ secrets.YANDEX_API_KEY }}
