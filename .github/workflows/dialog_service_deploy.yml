@@ -1,4 +1,4 @@
-name: Build & Deploy (Dialog Service) to Yandex Serverless Containers
+name: dialog-service-deploy
 
 on:
   push:
