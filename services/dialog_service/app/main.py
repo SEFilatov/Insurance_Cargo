@@ -9,6 +9,21 @@ from typing import Any, Dict, Optional, Tuple
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+# Для теста можно "*", для нормальной работы — конкретный домен GitHub Pages
+origins = ["https://sergeybritok.github.io"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,      # или ["*"] для быстрого теста
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 from pydantic import BaseModel, Field
 
 from openai import OpenAI
