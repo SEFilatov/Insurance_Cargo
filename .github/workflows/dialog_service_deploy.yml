@@ -41,7 +41,7 @@ jobs:
 
       # 3) Build & push образа (context = services/dialog)
       - name: Build and push dialog image
-        working-directory: services/dialog
+        working-directory: services/dialog_service
         run: |
           docker build -t $IMAGE_URL .
           docker push $IMAGE_URL
