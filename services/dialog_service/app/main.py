@@ -87,7 +87,6 @@ if YANDEX_FOLDER_ID and YANDEX_API_KEY:
 def _default_model() -> Optional[str]:
     if not YANDEX_FOLDER_ID:
         return None
-    
     if YANDEX_MODEL_URI:
         return YANDEX_MODEL_URI
     return f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite"
