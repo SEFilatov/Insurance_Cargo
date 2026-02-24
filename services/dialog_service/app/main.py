@@ -2,7 +2,7 @@ import os
 import re
 import json
 import time
-from typing import Any, Dict, Optional, Tuple, Literal
+from typing import Any, Dict, Optional, Tuple, Literal, List
 
 import requests
 from fastapi import FastAPI, HTTPException, Response
@@ -23,7 +23,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # =========================
 # ENV / CONFIG
 # =========================
@@ -42,6 +41,9 @@ SESSION_TTL_SEC = int(os.getenv("SESSION_TTL_SEC", "3600"))  # 1 hour
 CARGO_RETRY_MAX = int(os.getenv("CARGO_RETRY_MAX", "2"))      # additional user-triggered retries
 LLM_ATTEMPTS_PER_TRY = int(os.getenv("LLM_ATTEMPTS_PER_TRY", "3"))
 LLM_BASE_DELAY_SEC = float(os.getenv("LLM_BASE_DELAY_SEC", "0.6"))
+
+# Debug size limits
+DEBUG_MAX_TEXT = int(os.getenv("DEBUG_MAX_TEXT", "4000"))
 
 # Strict options (align with tariff_service)
 FRANCHISE_OPTIONS = [20000, 50000]
@@ -82,74 +84,130 @@ if YANDEX_FOLDER_ID and YANDEX_API_KEY:
         project=YANDEX_FOLDER_ID,
     )
 
-def _default_model() -> str:
+def _default_model() -> Optional[str]:
+    if not YANDEX_FOLDER_ID:
+        return None
     if YANDEX_MODEL_URI:
         return YANDEX_MODEL_URI
     return f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite"
 
 LLMStatus = Literal["ok", "uncertain", "error"]
 
-def llm_classify_cargo(
+def _clip(s: str, n: int = DEBUG_MAX_TEXT) -> str:
+    if s is None:
+        return ""
+    if len(s) <= n:
+        return s
+    return s[:n] + f"\n…(truncated, {len(s)} chars total)"
+
+def llm_classify_cargo_with_trace(
     desc: str,
+    debug_enabled: bool,
+    debug_trace: Dict[str, Any],
     max_attempts: int = LLM_ATTEMPTS_PER_TRY,
     base_delay_sec: float = LLM_BASE_DELAY_SEC,
 ) -> Tuple[Optional[str], LLMStatus, str]:
     """
-    Returns (cargo_class_id or None, status, reason).
-    - ok: cargo_class_id valid
-    - uncertain: model responded but cargo_class_id is null/invalid
-    - error: LLM call failed (auth/quota/network/etc) or not configured
-    Never raises.
+    Calls LLM and appends full request/response to debug_trace['llm_calls'] when debug_enabled.
+    Returns (cargo_class_id or None, status, reason). Never raises.
     """
     if not _client:
+        if debug_enabled:
+            debug_trace["llm_calls"].append({
+                "kind": "cargo_classification",
+                "status": "error",
+                "reason": "LLM not configured",
+                "input": desc,
+                "model": _default_model(),
+            })
         return None, "error", "LLM not configured"
 
-    system = {
-        "role": "system",
-        "content": (
-            "Ты классификатор грузов для страхования грузоперевозок. "
-            "Тебе дано описание груза и белый список допустимых классов. "
-            "Верни строго JSON без лишнего текста. "
-            "Если не уверен или груз не подходит — верни cargo_class_id=null.\n\n"
-            f"Белый список (id -> name): {json.dumps(CARGO_CLASSES, ensure_ascii=False)}"
-        ),
-    }
-    user = {
-        "role": "user",
-        "content": (
-            f"Описание груза: {desc}\n"
-            "Верни JSON: {\"cargo_class_id\": string|null, \"confidence\": 0..1, \"reason\": string}"
-        ),
-    }
+    system_msg = (
+        "Ты классификатор грузов для страхования грузоперевозок. "
+        "Тебе дано описание груза и белый список допустимых классов. "
+        "Верни строго JSON без лишнего текста. "
+        "Если не уверен или груз не подходит — верни cargo_class_id=null.\n\n"
+        f"Белый список (id -> name): {json.dumps(CARGO_CLASSES, ensure_ascii=False)}"
+    )
+    user_msg = (
+        f"Описание груза: {desc}\n"
+        "Верни JSON: {\"cargo_class_id\": string|null, \"confidence\": 0..1, \"reason\": string}"
+    )
+
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
+    ]
 
     last_reason = "unknown"
     last_uncertain_reason = "uncertain"
+    last_raw = ""
+    model = _default_model()
 
     for attempt in range(1, max_attempts + 1):
+        t0 = time.time()
+        err_name = None
+        parsed_obj = None
+        cid = None
+        status: LLMStatus = "error"
+
         try:
             resp = _client.chat.completions.create(
-                model=_default_model(),
-                messages=[system, user],
+                model=model,
+                messages=messages,
                 temperature=0.0,
             )
-            txt = resp.choices[0].message.content or ""
-            obj = json.loads(txt)
-            cid = obj.get("cargo_class_id")
-            reason = obj.get("reason", "")
-
+            last_raw = resp.choices[0].message.content or ""
+            # parse
+            parsed_obj = json.loads(last_raw)
+            cid = parsed_obj.get("cargo_class_id")
+            reason = parsed_obj.get("reason", "")
             if cid in CARGO_CLASSES:
-                return cid, "ok", reason
-
-            last_uncertain_reason = reason or "not in whitelist"
-            last_reason = last_uncertain_reason
-
+                status = "ok"
+                last_reason = reason
+            else:
+                status = "uncertain"
+                last_uncertain_reason = reason or "not in whitelist"
+                last_reason = last_uncertain_reason
         except Exception as e:
-            last_reason = f"LLM attempt {attempt} failed: {type(e).__name__}"
+            err_name = type(e).__name__
+            last_reason = f"LLM attempt {attempt} failed: {err_name}"
+            status = "error"
 
+        elapsed_ms = int((time.time() - t0) * 1000)
+
+        if debug_enabled:
+            debug_trace["llm_calls"].append({
+                "kind": "cargo_classification",
+                "attempt": attempt,
+                "elapsed_ms": elapsed_ms,
+                "model": model,
+                "request": {
+                    "messages": [
+                        {"role": "system", "content": _clip(system_msg)},
+                        {"role": "user", "content": _clip(user_msg)},
+                    ]
+                },
+                "response_raw": _clip(last_raw),
+                "response_parsed": parsed_obj,
+                "status": status,
+                "cargo_class_id": cid if cid in CARGO_CLASSES else None,
+                "cargo_class_name": CARGO_CLASSES.get(cid) if cid in CARGO_CLASSES else None,
+                "reason": last_reason,
+                "error": err_name,
+            })
+
+        if status == "ok" and cid in CARGO_CLASSES:
+            return cid, "ok", last_reason
+
+        # If uncertain, we can retry (sometimes output formatting is unstable)
+        # If error, retry as well.
         if attempt < max_attempts:
             time.sleep(base_delay_sec * attempt)
 
-    if "failed" in last_reason.lower() or "not configured" in last_reason.lower():
+    # Final decision after attempts
+    # If last attempt was a real LLM error -> error, else uncertain
+    if "failed" in last_reason.lower() or "not configured" in last_reason.lower() or "attempt" in last_reason.lower():
         return None, "error", last_reason
     return None, "uncertain", last_uncertain_reason or last_reason
 
@@ -286,7 +344,7 @@ def manual_cargo_choice_text() -> str:
 # =========================
 # Tariff engine call
 # =========================
-def call_tariff_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
+def call_tariff_engine(payload: Dict[str, Any], debug_enabled: bool, debug_trace: Dict[str, Any]) -> Dict[str, Any]:
     if not TARIFF_URL:
         raise HTTPException(status_code=500, detail="TARIFF_URL is not set")
 
@@ -294,15 +352,37 @@ def call_tariff_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
     if TARIFF_BEARER:
         headers["Authorization"] = f"Bearer {TARIFF_BEARER}"
 
+    t0 = time.time()
     try:
         r = requests.post(TARIFF_URL, headers=headers, json=payload, timeout=15)
     except Exception as e:
+        if debug_enabled:
+            debug_trace["tariff_call"] = {
+                "request": payload,
+                "error": type(e).__name__,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+            }
         raise HTTPException(status_code=502, detail=f"Tariff engine unreachable: {type(e).__name__}")
 
+    elapsed_ms = int((time.time() - t0) * 1000)
     if r.status_code >= 400:
+        if debug_enabled:
+            debug_trace["tariff_call"] = {
+                "request": payload,
+                "status_code": r.status_code,
+                "response_text": _clip(r.text),
+                "elapsed_ms": elapsed_ms,
+            }
         raise HTTPException(status_code=502, detail=f"Tariff engine error: {r.status_code} {r.text}")
 
-    return r.json()
+    result = r.json()
+    if debug_enabled:
+        debug_trace["tariff_call"] = {
+            "request": payload,
+            "response": result,
+            "elapsed_ms": elapsed_ms,
+        }
+    return result
 
 # =========================
 # API models
@@ -310,6 +390,7 @@ def call_tariff_engine(payload: Dict[str, Any]) -> Dict[str, Any]:
 class ChatRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1)
+    debug: bool = False
 
 class ChatResponse(BaseModel):
     session_id: str
@@ -317,6 +398,7 @@ class ChatResponse(BaseModel):
     stage: str
     intent: Optional[str]
     data: Dict[str, Any]
+    debug: Optional[Dict[str, Any]] = None
 
 # =========================
 # FastAPI app + CORS
@@ -345,7 +427,7 @@ def health():
         "tariff_url_set": bool(TARIFF_URL),
         "sessions": len(_SESSIONS),
         "allow_origins": origins,
-        "model": _default_model() if YANDEX_FOLDER_ID else None,
+        "model": _default_model(),
     }
 
 # =========================
@@ -398,201 +480,197 @@ def chat(req: ChatRequest):
     pending = s["pending"]
 
     text = req.message.strip()
-    tl = text.lower().strip()
+    debug_enabled = bool(req.debug)
 
-    # 1) Welcome -> Intent select
+    # Per-turn debug trace (returned to widget only when debug=true)
+    debug_trace: Dict[str, Any] = {
+        "turn": {
+            "session_id": req.session_id,
+            "incoming_message": text,
+            "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+        "session_before": {
+            "stage": s.get("stage"),
+            "intent": s.get("intent"),
+            "data": data.copy(),
+            "pending": {
+                "cargo_proposed": pending.get("cargo_proposed"),
+                "cargo_retry_count": pending.get("cargo_retry_count"),
+            },
+        },
+        "llm_calls": [],
+        "tariff_call": None,
+        "notes": [],
+    }
+
+    def respond(reply: str) -> ChatResponse:
+        # attach session_after snapshot
+        if debug_enabled:
+            debug_trace["session_after"] = {
+                "stage": s.get("stage"),
+                "intent": s.get("intent"),
+                "data": data.copy(),
+                "pending": {
+                    "cargo_proposed": pending.get("cargo_proposed"),
+                    "cargo_retry_count": pending.get("cargo_retry_count"),
+                },
+            }
+        return ChatResponse(
+            session_id=req.session_id,
+            reply=reply,
+            stage=s.get("stage"),
+            intent=s.get("intent"),
+            data=data,
+            debug=debug_trace if debug_enabled else None,
+        )
+
+    # 1) Welcome -> intent_select
     if s["stage"] == "welcome":
         s["stage"] = "intent_select"
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data, reply=WELCOME_TEXT)
+        return respond(WELCOME_TEXT)
 
     # 2) Intent selection
     if s["stage"] == "intent_select":
         if is_intent_consult(text):
             s["intent"] = "consult"
             s["stage"] = "consult"
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply="Хорошо. Сформулируйте ваш вопрос по страхованию грузоперевозок — я отвечу."
-            )
+            return respond("Хорошо. Сформулируйте ваш вопрос по страхованию грузоперевозок — я отвечу.")
         if is_intent_buy(text):
             s["intent"] = "buy"
             s["stage"] = "quote_sum"
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply="Отлично, оформим страховку. " + next_question("quote_sum")
-            )
-        return ChatResponse(
-            session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-            reply="Пожалуйста, напишите: **консультация** или **оформить страховку**."
-        )
+            return respond("Отлично, оформим страховку. " + next_question("quote_sum"))
+        return respond("Пожалуйста, напишите: **консультация** или **оформить страховку**.")
 
-    # 3) Consult mode (MVP)
+    # 3) Consult mode (MVP placeholder; later RAG)
     if s["stage"] == "consult":
         if is_intent_buy(text):
             s["intent"] = "buy"
             s["stage"] = "quote_sum"
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply="Понял. Давайте оформим. " + next_question("quote_sum")
-            )
-        return ChatResponse(
-            session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-            reply=(
-                "Понял вопрос. Сейчас я могу подсказать общий порядок и требования.\n"
-                "Если хотите — уточните: какой груз, какая сумма и зона перевозки.\n"
-                "Если нужно сразу рассчитать стоимость — напишите: **оформить страховку**."
-            )
+            return respond("Понял. Давайте оформим. " + next_question("quote_sum"))
+        return respond(
+            "Понял вопрос. Сейчас я могу подсказать общий порядок и требования.\n"
+            "Если хотите — уточните: какой груз, какая сумма и зона перевозки.\n"
+            "Если нужно сразу рассчитать стоимость — напишите: **оформить страховку**."
         )
 
     # =========================
     # BUY FLOW
     # =========================
 
-    # cargo_confirm
+    # cargo_confirm: confirm proposed cargo class
     if s["stage"] == "cargo_confirm" and pending.get("cargo_proposed"):
         yn = parse_yes_no(text)
         if yn is True:
             data["cargo_class_id"] = pending["cargo_proposed"]["id"]
             pending["cargo_proposed"] = None
             s["stage"] = "quote_condition"
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply=next_question("quote_condition"))
+            return respond(next_question("quote_condition"))
         if yn is False:
             pending["cargo_proposed"] = None
             data["cargo_class_id"] = None
             data["cargo_desc"] = None
             s["stage"] = "quote_cargo"
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Ок. Тогда уточните, пожалуйста, какой груз перевозите (1–2 слова)?")
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply="Подтвердите, пожалуйста: **да** или **нет**.")
+            return respond("Ок. Тогда уточните, пожалуйста, какой груз перевозите (1–2 слова)?")
+        return respond("Подтвердите, пожалуйста: **да** или **нет**.")
 
-    # cargo_retry
+    # cargo_retry: retry classification after user "waits"
     if s["stage"] == "cargo_retry":
         pending["cargo_retry_count"] = int(pending.get("cargo_retry_count", 0)) + 1
         desc = data.get("cargo_desc") or ""
 
-        cid, status, reason = llm_classify_cargo(desc)
+        cid, status, reason = llm_classify_cargo_with_trace(desc, debug_enabled, debug_trace)
         if status == "ok" and cid:
             pending["cargo_proposed"] = {"id": cid, "name": CARGO_CLASSES[cid]}
             s["stage"] = "cargo_confirm"
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply=f"Похоже, ваш груз относится к категории: «{CARGO_CLASSES[cid]}». Верно? (да/нет)"
-            )
+            return respond(f"Похоже, ваш груз относится к категории: «{CARGO_CLASSES[cid]}». Верно? (да/нет)")
 
         if status == "error" and pending["cargo_retry_count"] <= CARGO_RETRY_MAX:
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply=(
-                    "Секунду, уточняю категорию груза… сервис классификации временно отвечает нестабильно.\n"
-                    "Подождите 5–10 секунд и отправьте любое сообщение (например, «ок»), я попробую ещё раз."
-                ),
+            return respond(
+                "Секунду, уточняю категорию груза… сервис классификации временно отвечает нестабильно.\n"
+                "Подождите 5–10 секунд и отправьте любое сообщение (например, «ок»), я попробую ещё раз."
             )
 
         s["stage"] = "cargo_choose"
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply=manual_cargo_choice_text())
+        return respond(manual_cargo_choice_text())
 
-    # cargo_choose
+    # cargo_choose: manual selection
     if s["stage"] == "cargo_choose":
         cid = parse_manual_cargo_choice(text)
         if cid:
             data["cargo_class_id"] = cid
             s["stage"] = "quote_condition"
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply=f"Принял категорию: «{CARGO_CLASSES[cid]}».\n{next_question('quote_condition')}"
-            )
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply="Пожалуйста, введите номер категории (1–16).")
+            return respond(f"Принял категорию: «{CARGO_CLASSES[cid]}».\n{next_question('quote_condition')}")
+        return respond("Пожалуйста, введите номер категории (1–16).")
 
     # quote_sum
     if s["stage"] == "quote_sum":
         val = parse_sum_rub(text)
         if val is None:
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Не понял сумму. Укажите, пожалуйста, например: 5 000 000 или 5 млн.")
+            return respond("Не понял сумму. Укажите, пожалуйста, например: 5 000 000 или 5 млн.")
         data["sum_insured_rub"] = val
         s["stage"] = "quote_cargo"
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply="Спасибо. " + next_question("quote_cargo"))
+        return respond("Спасибо. " + next_question("quote_cargo"))
 
     # quote_cargo
     if s["stage"] == "quote_cargo":
         data["cargo_desc"] = text
         pending["cargo_retry_count"] = 0
 
-        cid, status, reason = llm_classify_cargo(text)
+        cid, status, reason = llm_classify_cargo_with_trace(text, debug_enabled, debug_trace)
 
         if status == "ok" and cid:
             pending["cargo_proposed"] = {"id": cid, "name": CARGO_CLASSES[cid]}
             s["stage"] = "cargo_confirm"
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply=f"Похоже, ваш груз относится к категории: «{CARGO_CLASSES[cid]}». Верно? (да/нет)"
-            )
+            return respond(f"Похоже, ваш груз относится к категории: «{CARGO_CLASSES[cid]}». Верно? (да/нет)")
 
         if status == "error":
             s["stage"] = "cargo_retry"
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply=(
-                    "Секунду, уточняю категорию груза…\n"
-                    "Подождите 5–10 секунд и отправьте любое сообщение (например, «ок»), я попробую ещё раз."
-                ),
+            return respond(
+                "Секунду, уточняю категорию груза…\n"
+                "Подождите 5–10 секунд и отправьте любое сообщение (например, «ок»), я попробую ещё раз."
             )
 
         s["stage"] = "cargo_choose"
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply=manual_cargo_choice_text())
+        return respond(manual_cargo_choice_text())
 
     # quote_condition
     if s["stage"] == "quote_condition":
         cond = parse_condition(text)
         if cond is None:
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Укажите: NEW (новый) или USED (б/у).")
+            return respond("Укажите: NEW (новый) или USED (б/у).")
         data["condition"] = cond
         s["stage"] = "quote_franchise"
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply=next_question("quote_franchise"))
+        return respond(next_question("quote_franchise"))
 
     # quote_franchise
     if s["stage"] == "quote_franchise":
         fr = parse_franchise(text)
         if fr is None or fr not in FRANCHISE_OPTIONS:
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Выберите франшизу строго из списка: 20 000 ₽ или 50 000 ₽.")
+            return respond("Выберите франшизу строго из списка: 20 000 ₽ или 50 000 ₽.")
         data["franchise_rub"] = fr
         s["stage"] = "quote_reefer"
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply=next_question("quote_reefer"))
+        return respond(next_question("quote_reefer"))
 
     # quote_reefer
     if s["stage"] == "quote_reefer":
         rr = parse_reefer(text)
         if rr is None:
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Нужен рефрижератор? Ответьте: да или нет.")
+            return respond("Нужен рефрижератор? Ответьте: да или нет.")
         data["is_reefer"] = rr
         s["stage"] = "quote_route"
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply=next_question("quote_route"))
+        return respond(next_question("quote_route"))
 
     # quote_route -> call tariff
     if s["stage"] == "quote_route":
         rz = parse_route_zone(text)
         if rz is None or rz not in ROUTE_OPTIONS:
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Выберите зону строго из списка: РФ / СНГ-РФ / ВЕСЬ МИР-РФ")
+            return respond("Выберите зону строго из списка: РФ / СНГ-РФ / ВЕСЬ МИР-РФ")
         data["route_zone"] = rz
 
         missing = quote_missing(data)
         if missing:
             s["stage"] = "quote_sum"
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Не хватает данных для расчёта. " + next_question("quote_sum"))
+            return respond("Не хватает данных для расчёта. " + next_question("quote_sum"))
 
         payload = {
             "cargo_class_id": data["cargo_class_id"],
@@ -603,53 +681,40 @@ def chat(req: ChatRequest):
             "route_zone": data["route_zone"],
         }
 
-        result = call_tariff_engine(payload)
+        result = call_tariff_engine(payload, debug_enabled, debug_trace)
         decision = result.get("decision", "REFER")
 
         if decision == "AUTO_OK":
             premium = result.get("premium_rub")
             s["stage"] = "quoted"
-            return ChatResponse(
-                session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                reply=f"Стоимость страховки: {premium} ₽.\nСогласны оформить? (да/нет)"
-            )
+            return respond(f"Стоимость страховки: {premium} ₽.\nСогласны оформить? (да/нет)")
 
         reasons = ", ".join(result.get("reasons", [])) or "нужна проверка"
         s["stage"] = "refer"
-        return ChatResponse(
-            session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-            reply=f"Онлайн-оформление недоступно: {reasons}. Хотите передать заявку менеджеру? (да/нет)"
-        )
+        return respond(f"Онлайн-оформление недоступно: {reasons}. Хотите передать заявку менеджеру? (да/нет)")
 
     # quoted
     if s["stage"] == "quoted":
         yn = parse_yes_no(text)
         if yn is True:
             s["stage"] = "next_phase"
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Отлично. Следующий шаг — ввод контактных данных и выпуск полиса. Эту фазу подключим дальше.")
+            return respond("Отлично. Следующий шаг — ввод контактных данных и выпуск полиса. Эту фазу подключим дальше.")
         if yn is False:
             s["stage"] = "intent_select"
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Ок. Хотите консультацию или рассчитать другую перевозку? (консультация / оформить страховку)")
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply="Ответьте, пожалуйста: да или нет.")
+            return respond("Ок. Хотите консультацию или рассчитать другую перевозку? (консультация / оформить страховку)")
+        return respond("Ответьте, пожалуйста: да или нет.")
 
     # refer
     if s["stage"] == "refer":
         yn = parse_yes_no(text)
         if yn is True:
             s["stage"] = "handoff"
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Принято. (MVP) Передача менеджеру будет подключена следующим шагом.")
+            return respond("Принято. (MVP) Передача менеджеру будет подключена следующим шагом.")
         if yn is False:
             s["stage"] = "intent_select"
-            return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                                reply="Ок. Хотите консультацию или рассчитать другую перевозку? (консультация / оформить страховку)")
-        return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                            reply="Ответьте, пожалуйста: да или нет.")
+            return respond("Ок. Хотите консультацию или рассчитать другую перевозку? (консультация / оформить страховку)")
+        return respond("Ответьте, пожалуйста: да или нет.")
 
     # fallback
     s["stage"] = "intent_select"
-    return ChatResponse(session_id=req.session_id, stage=s["stage"], intent=s["intent"], data=data,
-                        reply="Давайте начнём: вам нужна консультация или оформить страховку?")
+    return respond("Давайте начнём: вам нужна консультация или оформить страховку?")
