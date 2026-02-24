@@ -28,7 +28,7 @@ app.add_middleware(
 # =========================
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "").strip()
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
-YANDEX_BASE_URL = os.getenv("YANDEX_BASE_URL", "https://llm.api.cloud.yandex.net/v1").strip()
+YANDEX_BASE_URL = os.getenv("YANDEX_BASE_URL", "https://llm.api.cloud.yandex.net/v1/chat/completions").strip()
 YANDEX_MODEL_URI = os.getenv("YANDEX_MODEL_URI", "").strip()
 
 TARIFF_URL = os.getenv("TARIFF_URL", "").strip()
